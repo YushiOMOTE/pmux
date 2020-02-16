@@ -19,6 +19,9 @@ async fn frontend_handle(mut client: TcpStream, backend: SocketAddr, src_port: u
 
     let mut backend = Codec::new().framed(backend);
 
+    backend.send(Message::init(dst_port)).await?;
+    info!("[{}: {}->{}] Sent initial message", addr, src_port, dst_port);
+
     loop {
         let mut buf = [0; 1024];
 

@@ -19,8 +19,10 @@ async fn handle_client(client: TcpStream) -> Result<()> {
             let item = item?;
             let port = item.port;
             let addr = localhost(port);
-            let mut conn = TcpStream::connect(addr).await?;
-            conn.write_all(&item.payload).await?;
+            let conn = TcpStream::connect(addr).await?;
+            if item.payload.len() != 0 {
+                warn!("[{}] Initial message should not contain payload", addr);
+            }
             (port, conn)
         },
         None => {
