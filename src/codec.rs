@@ -22,6 +22,14 @@ impl Message {
             payload: payload.into(),
         }
     }
+
+    pub fn init(port: u16) -> Self {
+        Self {
+            port,
+            size: 0,
+            payload: BytesMut::new(),
+        }
+    }
 }
 
 pub struct Codec {
