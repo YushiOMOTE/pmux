@@ -1,16 +1,17 @@
+use log::*;
 use structopt::StructOpt;
 
-mod codec;
-mod error;
-mod util;
-mod options;
 mod backend;
+mod error;
 mod frontend;
+mod options;
+mod proto;
+mod util;
 
-use crate::options::{Opt, Cmd};
-use crate::error::Result;
 use crate::backend::backend;
+use crate::error::Result;
 use crate::frontend::frontend;
+use crate::options::{Cmd, Opt};
 
 async fn run(opt: &Opt) -> Result<()> {
     match &opt.cmd {
@@ -25,7 +26,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + 'static>>
 
     let opt = Opt::from_args();
 
-    run(&opt).await.map_err(|e| Box::new(e))?;
+    if let Err(e) = run(&opt).await {
+        error!("{}", e);
+    }
 
     Ok(())
 }

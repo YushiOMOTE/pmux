@@ -1,63 +1,34 @@
+use anyhow::anyhow;
 use log::*;
-use tokio::net::{TcpStream, TcpListener};
-use tokio::stream::StreamExt;
-use futures::SinkExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::codec::Decoder;
+use std::net::SocketAddr;
+use tokio::io::{copy, split};
+use tokio::net::{TcpListener, TcpStream};
 
-use crate::codec::{Codec, Message};
 use crate::error::Result;
 use crate::options::Backend;
-use crate::util::{localhost, peer};
+use crate::proto::read_header;
 
-async fn handle_client(client: TcpStream) -> Result<()> {
-    let addr = peer(&client);
-    let mut client = Codec::new().framed(client);
+async fn handle(mut cli: TcpStream, cli_addr: &SocketAddr) -> Result<()> {
+    let header = read_header(&mut cli).await?;
 
-    let (port, mut conn) = match client.next().await {
-        Some(item) => {
-            let item = item?;
-            let port = item.port;
-            let addr = localhost(port);
-            let conn = TcpStream::connect(addr).await?;
-            if item.payload.len() != 0 {
-                warn!("[{}] Initial message should not contain payload", addr);
-            }
-            (port, conn)
+    let srv = TcpStream::connect(header.addr).await?;
+
+    let (mut cr, mut cw) = split(cli);
+    let (mut sr, mut sw) = split(srv);
+
+    let up = copy(&mut cr, &mut sw);
+    let down = copy(&mut sr, &mut cw);
+
+    tokio::select! {
+        r = up => {
+            r.map_err(|e| anyhow!("[{}] Cannot forward to server: {}", cli_addr, e))?;
         },
-        None => {
-            info!("[{}] Connection closed without any message", addr);
-            return Ok(())
-        }
-    };
-
-    info!("[{}] Redirect to {}", addr, peer(&conn));
-
-    loop {
-        let mut buf = [0; 1024];
-
-        tokio::select! {
-            item = client.next() => match item {
-                Some(item) => {
-                    let item = item?;
-                    conn.write_all(&item.payload).await?
-                },
-                None => {
-                    info!("[{}] Connection closed by client", addr);
-                    break;
-                },
-            },
-            size = conn.read(&mut buf) => {
-                let size = size?;
-                if size == 0 {
-                    info!("[{}] Connection closed by destination", addr);
-                    break;
-                }
-                let msg = Message::new(port, &buf[0..size]);
-                client.send(msg).await?;
-            }
-        }
+        r = down => {
+            r.map_err(|e| anyhow!("[{}] Cannot forward to client: {}", cli_addr, e))?;
+        },
     }
+
+    info!("[{}] Finished forwarding", cli_addr);
 
     Ok(())
 }
@@ -68,14 +39,12 @@ pub async fn backend(opt: &Backend) -> Result<()> {
     let mut listener = TcpListener::bind(&opt.bind).await?;
 
     loop {
-        let (client, _) = listener.accept().await?;
+        let (cli, addr) = listener.accept().await?;
 
         tokio::spawn(async move {
-            let addr = peer(&client);
-
             info!("[{}] Connection accepted", addr);
 
-            if let Err(e) = handle_client(client).await {
+            if let Err(e) = handle(cli, &addr).await {
                 error!("[{}] Error occurred: {}", addr, e);
             }
         });

@@ -9,7 +9,7 @@ log = "0.4"
 env_logger = "0.7"
 structopt = "0.3"
 futures = "0.3"
-tokio = { version = "0.2", features = ["macros", "tcp", "rt-core", "stream", "io-util"] }
+tokio = { version = "0.2", features = ["full"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 anyhow = "1.0"
 thiserror = "1.0"

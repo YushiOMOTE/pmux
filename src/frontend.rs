@@ -1,69 +1,67 @@
+use anyhow::anyhow;
 use log::*;
-use std::net::SocketAddr;
-use tokio::net::{TcpStream, TcpListener};
-use tokio::stream::StreamExt;
-use futures::SinkExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::codec::Decoder;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tokio::io::{copy, split};
+use tokio::net::{TcpListener, TcpStream};
 
-use crate::codec::{Codec, Message};
+// use crate::codec::{Codec, Message};
 use crate::error::{Error, Result};
 use crate::options::Frontend;
-use crate::util::{localhost, peer};
+use crate::proto::{write_header, Header};
+use crate::util::localhost;
 
-async fn frontend_handle(mut client: TcpStream, backend: SocketAddr, src_port: u16, dst_port: u16) -> Result<()> {
-    let addr = peer(&client);
+async fn frontend_handle(
+    cli: TcpStream,
+    cli_addr: &SocketAddr,
+    backend_addr: &SocketAddr,
+    src_port: u16,
+    dst: &SocketAddr,
+) -> Result<()> {
+    let mut backend = TcpStream::connect(backend_addr).await?;
+    info!(
+        "[{}: {}->{}] Connected to backend {}",
+        cli_addr, src_port, dst, backend_addr,
+    );
 
-    let backend = TcpStream::connect(backend).await?;
-    info!("[{}: {}->{}] Connected to backend {}", addr, src_port, dst_port, peer(&backend));
+    write_header(&mut backend, Header::new(dst.clone())).await?;
 
-    let mut backend = Codec::new().framed(backend);
+    let (mut br, mut bw) = split(backend);
+    let (mut cr, mut cw) = split(cli);
 
-    backend.send(Message::init(dst_port)).await?;
-    info!("[{}: {}->{}] Sent initial message", addr, src_port, dst_port);
+    let up = copy(&mut cr, &mut bw);
+    let down = copy(&mut br, &mut cw);
 
-    loop {
-        let mut buf = [0; 1024];
-
-        tokio::select! {
-            item = backend.next() => match item {
-                Some(item) => {
-                    let item = item?;
-                    client.write_all(&item.payload).await?
-                },
-                None => {
-                    info!("[{}: {}->{}] Connection closed by backend", addr, src_port, dst_port);
-                    break;
-                },
-            },
-            size = client.read(&mut buf) => {
-                let size = size?;
-                if size == 0 {
-                    info!("[{}: {}->{}] Connection closed by client", addr, src_port, dst_port);
-                    break;
-                }
-                let msg = Message::new(dst_port, &buf[0..size]);
-                backend.send(msg).await?;
-            }
-        }
+    tokio::select! {
+        r = up => {
+            r.map_err(|e| anyhow!("[{}] Cannot forward to backend: {}", cli_addr, e))?;
+        },
+        r = down => {
+            r.map_err(|e| anyhow!("[{}] Cannot forward to client: {}", cli_addr, e))?;
+        },
     }
+
+    info!("[{}] Finished forwarding", cli_addr);
 
     Ok(())
 }
 
-async fn start_rule(backend: SocketAddr, src_port: u16, dst_port: u16) -> Result<()> {
+async fn start_rule(backend: &SocketAddr, src_port: u16, dst: &SocketAddr) -> Result<()> {
     let mut listener = TcpListener::bind(localhost(src_port)).await?;
 
     loop {
-        let (client, _) = listener.accept().await?;
+        let (cli, cli_addr) = listener.accept().await?;
+
+        let backend_addr = backend.clone();
+        let dst = dst.clone();
 
         tokio::spawn(async move {
-            let addr = peer(&client);
+            info!("[{}: {}->{}] Connection accepted", cli_addr, src_port, dst);
 
-            info!("[{}: {}->{}] Connection accepted", addr, src_port, dst_port);
-
-            if let Err(e) = frontend_handle(client, backend, src_port, dst_port).await {
-                error!("[{}: {}->{}] Error occurred: {}", addr, src_port, dst_port, e);
+            if let Err(e) = frontend_handle(cli, &cli_addr, &backend_addr, src_port, &dst).await {
+                error!(
+                    "[{}: {}->{}] Error occurred: {}",
+                    cli_addr, src_port, dst, e
+                );
             }
         });
     }
@@ -75,25 +73,28 @@ pub async fn frontend(opt: &Frontend) -> Result<()> {
     for rule in &opt.rules {
         let mut tokens = rule.split(':');
         let src_port = match tokens.next() {
-            Some(src) => {
-                src.parse().map_err(|e| Error::RuleError(format!("Invalid src port: {}", e)))?
-            }
-            None => return Err(Error::RuleError("Invalid tokens".into()))
+            Some(src) => src
+                .parse()
+                .map_err(|e| anyhow!("Invalid src port: {}", e))?,
+            None => return Err(anyhow!("Invalid tokens")),
         };
-        let dst_port: u16 = match tokens.next() {
+        let dst: SocketAddr = match tokens.next() {
             Some(dst) => {
-                dst.parse().map_err(|e| Error::RuleError(format!("Invalid dst port: {}", e)))?
+                let port = dst
+                    .parse()
+                    .map_err(|e| Error::RuleError(format!("Invalid dst port: {}", e)))?;
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
             }
-            None => src_port
+            None => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), src_port),
         };
 
-        info!("[{}->{}] Starting redirection", src_port, dst_port);
+        info!("[{}->{}] Starting redirection", src_port, dst);
 
         let backend = opt.backend.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(e) = start_rule(backend, src_port, dst_port).await {
-                error!("[{}->{}] Error occurred: {}", src_port, dst_port, e);
+            if let Err(e) = start_rule(&backend, src_port, &dst).await {
+                error!("[{}->{}] Error occurred: {}", src_port, dst, e);
             }
         });
 

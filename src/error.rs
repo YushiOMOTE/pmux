@@ -8,4 +8,4 @@ pub enum Error {
     JoinError(#[from] tokio::task::JoinError),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
