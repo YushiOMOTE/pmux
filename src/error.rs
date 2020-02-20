@@ -1,7 +1,5 @@
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Rule error {0}")]
-    RuleError(String),
     #[error("Io error {0:?}")]
     IoError(#[from] std::io::Error),
     #[error("Join error {0:?}")]
